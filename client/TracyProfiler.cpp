@@ -1138,7 +1138,9 @@ void Profiler::SpawnWorkerThreads()
 
 #if defined _WIN32 || defined __CYGWIN__
     s_profilerThreadId = GetThreadId( s_thread->Handle() );
-    AddVectoredExceptionHandler( 1, CrashFilter );
+    
+    // VRV_PATCH remove crash filter
+    //AddVectoredExceptionHandler( 1, CrashFilter );
 #endif
 
 #ifdef __linux__
