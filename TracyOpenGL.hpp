@@ -189,7 +189,7 @@ public:
         : m_active( is_active )
 #endif
     {
-        if( !m_active ) return;
+        if( !m_active || !GetGpuCtx().ptr) return;
 
         const auto queryId = GetGpuCtx().ptr->NextQueryId();
         glQueryCounter( GetGpuCtx().ptr->TranslateOpenGlQueryId( queryId ), GL_TIMESTAMP );
@@ -210,7 +210,7 @@ public:
         : m_active( is_active )
 #endif
     {
-        if( !m_active ) return;
+        if( !m_active || !GetGpuCtx().ptr) return;
 
         const auto queryId = GetGpuCtx().ptr->NextQueryId();
         glQueryCounter( GetGpuCtx().ptr->TranslateOpenGlQueryId( queryId ), GL_TIMESTAMP );
