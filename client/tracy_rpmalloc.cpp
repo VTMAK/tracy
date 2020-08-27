@@ -1711,6 +1711,10 @@ rp_thread_destructor(void* value) {
 //! Initialize the allocator and setup global data
 extern inline int
 rpmalloc_initialize(void) {
+// VRV PATCH to help multiple threads launch at the same time
+	static std::mutex mutx;
+	std::lock_guard<std::mutex> lock(mutx);
+// END
 	if (_rpmalloc_initialized) {
 		rpmalloc_thread_initialize();
 		return 0;
