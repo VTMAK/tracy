@@ -1,0 +1,14 @@
+HowToBuild Windows:
+
+Run vcpkg/install_vcpkg_dependencies.bat
+
+Open library/win32/TracyProfiler.sln
+Switch to ReleaseOnDemand.
+Build
+Copy libs from library/win32/x64 files into folders for copying to release engineering (.pdb and .dll and .lib)
+Copy includes from common/client/root folders into the include folder for release engineering package.
+
+Open profiler/build/win32/Tracy.sln
+Switch to Release
+Build
+Copy Tracy.exe form profiler/build/win32/
