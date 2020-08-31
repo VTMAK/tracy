@@ -229,7 +229,7 @@ public:
 
     tracy_force_inline ~GpuCtxScope()
     {
-        if( !m_active ) return;
+        if( !m_active || !GetGpuCtx().ptr) return;
 
         const auto queryId = GetGpuCtx().ptr->NextQueryId();
         glQueryCounter( GetGpuCtx().ptr->TranslateOpenGlQueryId( queryId ), GL_TIMESTAMP );
