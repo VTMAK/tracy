@@ -984,7 +984,7 @@ std::atomic<ThreadNameData*>& GetThreadNameData() { return GetProfilerData().thr
 TRACY_API LuaZoneState& GetLuaZoneState() { return GetProfilerThreadData().luaZoneState; }
 #  endif
 
-#  ifndef TRACY_MANUAL_LIFETIME
+#  if  !defined(TRACY_MANUAL_LIFETIME) && !defined(TRACY_DELAYED_INIT) 
 namespace
 {
     const auto& __profiler_init = GetProfiler();
@@ -3154,9 +3154,7 @@ TRACY_API uint64_t ___tracy_alloc_srcloc_name( uint32_t line, const char* source
 // call every time they create a thread. Here we can then put all sorts of per-thread
 // initialization.
 TRACY_API void ___tracy_init_thread(void) {
-#ifdef TRACY_DELAYED_INIT
-    (void)tracy::GetProfilerThreadData();
-#else
+#ifndef TRACY_DELAYED_INIT
     (void)tracy::s_rpmalloc_thread_init;
 #endif
 }
