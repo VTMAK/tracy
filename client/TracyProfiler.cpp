@@ -227,7 +227,11 @@ static int64_t SetupHwTimer()
         const char* noCheck = getenv( "TRACY_NO_INVARIANT_CHECK" );
         if( !noCheck || noCheck[0] != '1' )
         {
+#if defined _WIN32 || defined __CYGWIN__
             InitFailure( "CPU doesn't support invariant TSC.\nDefine TRACY_NO_INVARIANT_CHECK=1 to ignore this error, *if you know what you are doing*.\nAlternatively you may rebuild the application with the TRACY_TIMER_QPC define to use lower resolution timer." );
+#else
+            InitFailure( "CPU doesn't support invariant TSC.\nDefine TRACY_NO_INVARIANT_CHECK=1 to ignore this error, *if you know what you are doing*." );
+#endif
         }
     }
 #endif
@@ -538,6 +542,8 @@ static char s_crashText[1024];
 
 LONG WINAPI CrashFilter( PEXCEPTION_POINTERS pExp )
 {
+    if( !GetProfiler().IsConnected() ) return EXCEPTION_CONTINUE_SEARCH;
+
     const unsigned ec = pExp->ExceptionRecord->ExceptionCode;
     auto msgPtr = s_crashText;
     switch( ec )
@@ -588,12 +594,12 @@ LONG WINAPI CrashFilter( PEXCEPTION_POINTERS pExp )
     }
 
     {
+        GetProfiler().SendCallstack( 60, "KiUserExceptionDispatcher" );
+
         TracyLfqPrepare( QueueType::CrashReport );
         item->crashReport.time = Profiler::GetTime();
         item->crashReport.text = (uint64_t)s_crashText;
         TracyLfqCommit;
-
-        GetProfiler().SendCallstack( 60, "KiUserExceptionDispatcher" );
     }
 
     HANDLE h = CreateToolhelp32Snapshot( TH32CS_SNAPTHREAD, 0 );
@@ -820,12 +826,12 @@ static void CrashHandler( int signal, siginfo_t* info, void* /*ucontext*/ )
     }
 
     {
+        GetProfiler().SendCallstack( 60, "__kernel_rt_sigreturn" );
+
         TracyLfqPrepare( QueueType::CrashReport );
         item->crashReport.time = Profiler::GetTime();
         item->crashReport.text = (uint64_t)s_crashText;
         TracyLfqCommit;
-
-        GetProfiler().SendCallstack( 60, "__kernel_rt_sigreturn" );
     }
 
     DIR* dp = opendir( "/proc/self/task" );
@@ -1369,6 +1375,11 @@ void Profiler::Worker()
 #ifndef TRACY_NO_EXIT
             if( !m_noExit && ShouldExit() )
             {
+                if( m_broadcast )
+                {
+                    broadcastMsg.activeTime = -1;
+                    m_broadcast->Send( broadcastPort, &broadcastMsg, broadcastLen );
+                }
                 m_shutdownFinished.store( true, std::memory_order_relaxed );
                 return;
             }
@@ -1386,10 +1397,18 @@ void Profiler::Worker()
                 {
                     lastBroadcast = t;
                     const auto ts = std::chrono::duration_cast<std::chrono::seconds>( std::chrono::system_clock::now().time_since_epoch() ).count();
-                    broadcastMsg.activeTime = uint32_t( ts - m_epoch );
+                    broadcastMsg.activeTime = int32_t( ts - m_epoch );
+                    assert( broadcastMsg.activeTime >= 0 );
                     m_broadcast->Send( broadcastPort, &broadcastMsg, broadcastLen );
                 }
             }
+        }
+
+        if( m_broadcast )
+        {
+            lastBroadcast = 0;
+            broadcastMsg.activeTime = -1;
+            m_broadcast->Send( broadcastPort, &broadcastMsg, broadcastLen );
         }
 
         // Handshake
@@ -2143,7 +2162,9 @@ Profiler::DequeueStatus Profiler::DequeueSerial()
                     break;
                 }
                 case QueueType::MemAlloc:
+                case QueueType::MemAllocNamed:
                 case QueueType::MemAllocCallstack:
+                case QueueType::MemAllocCallstackNamed:
                 {
                     int64_t t = MemRead<int64_t>( &item->memAlloc.time );
                     int64_t dt = t - refSerial;
@@ -2152,7 +2173,9 @@ Profiler::DequeueStatus Profiler::DequeueSerial()
                     break;
                 }
                 case QueueType::MemFree:
+                case QueueType::MemFreeNamed:
                 case QueueType::MemFreeCallstack:
+                case QueueType::MemFreeCallstackNamed:
                 {
                     int64_t t = MemRead<int64_t>( &item->memFree.time );
                     int64_t dt = t - refSerial;
@@ -2804,10 +2827,9 @@ void Profiler::ReportTopology()
 void Profiler::SendCallstack( int depth, const char* skipBefore )
 {
 #ifdef TRACY_HAS_CALLSTACK
+    TracyLfqPrepare( QueueType::Callstack );
     auto ptr = Callstack( depth );
     CutCallstack( ptr, skipBefore );
-
-    TracyLfqPrepare( QueueType::Callstack );
     MemWrite( &item->callstackFat.ptr, (uint64_t)ptr );
     TracyLfqCommit;
 #endif
@@ -2972,14 +2994,13 @@ TRACY_API TracyCZoneCtx ___tracy_emit_zone_begin_callstack( const struct ___trac
         TracyLfqCommitC;
     }
 #endif
+    tracy::GetProfiler().SendCallstack( depth );
     {
         TracyLfqPrepareC( tracy::QueueType::ZoneBeginCallstack );
         tracy::MemWrite( &item->zoneBegin.time, tracy::Profiler::GetTime() );
         tracy::MemWrite( &item->zoneBegin.srcloc, (uint64_t)srcloc );
         TracyLfqCommitC;
     }
-
-    tracy::GetProfiler().SendCallstack( depth );
     return ctx;
 }
 
@@ -3038,14 +3059,13 @@ TRACY_API TracyCZoneCtx ___tracy_emit_zone_begin_alloc_callstack( uint64_t srclo
         TracyLfqCommitC;
     }
 #endif
+    tracy::GetProfiler().SendCallstack( depth );
     {
         TracyLfqPrepareC( tracy::QueueType::ZoneBeginAllocSrcLocCallstack );
         tracy::MemWrite( &item->zoneBegin.time, tracy::Profiler::GetTime() );
         tracy::MemWrite( &item->zoneBegin.srcloc, srcloc );
         TracyLfqCommitC;
     }
-
-    tracy::GetProfiler().SendCallstack( depth );
     return ctx;
 }
 
@@ -3129,6 +3149,10 @@ TRACY_API void ___tracy_emit_memory_alloc( const void* ptr, size_t size, int sec
 TRACY_API void ___tracy_emit_memory_alloc_callstack( const void* ptr, size_t size, int depth, int secure ) { tracy::Profiler::MemAllocCallstack( ptr, size, depth, secure != 0 ); }
 TRACY_API void ___tracy_emit_memory_free( const void* ptr, int secure ) { tracy::Profiler::MemFree( ptr, secure != 0 ); }
 TRACY_API void ___tracy_emit_memory_free_callstack( const void* ptr, int depth, int secure ) { tracy::Profiler::MemFreeCallstack( ptr, depth, secure != 0 ); }
+TRACY_API void ___tracy_emit_memory_alloc_named( const void* ptr, size_t size, int secure, const char* name ) { tracy::Profiler::MemAllocNamed( ptr, size, secure != 0, name ); }
+TRACY_API void ___tracy_emit_memory_alloc_callstack_named( const void* ptr, size_t size, int depth, int secure, const char* name ) { tracy::Profiler::MemAllocCallstackNamed( ptr, size, depth, secure != 0, name ); }
+TRACY_API void ___tracy_emit_memory_free_named( const void* ptr, int secure, const char* name ) { tracy::Profiler::MemFreeNamed( ptr, secure != 0, name ); }
+TRACY_API void ___tracy_emit_memory_free_callstack_named( const void* ptr, int depth, int secure, const char* name ) { tracy::Profiler::MemFreeCallstackNamed( ptr, depth, secure != 0, name ); }
 TRACY_API void ___tracy_emit_frame_mark( const char* name ) { tracy::Profiler::SendFrameMark( name ); }
 TRACY_API void ___tracy_emit_frame_mark_start( const char* name ) { tracy::Profiler::SendFrameMark( name, tracy::QueueType::FrameMarkMsgStart ); }
 TRACY_API void ___tracy_emit_frame_mark_end( const char* name ) { tracy::Profiler::SendFrameMark( name, tracy::QueueType::FrameMarkMsgEnd ); }

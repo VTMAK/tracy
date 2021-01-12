@@ -240,7 +240,6 @@ void WINAPI EventRecordCallbackVsync( PEVENT_RECORD record )
     }
     while( ++idx < 8 );
 
-    const char* name = "Vsync";
     TracyLfqPrepare( QueueType::FrameMarkMsg );
     MemWrite( &item->frameMark.time, hdr.TimeStamp.QuadPart );
     MemWrite( &item->frameMark.name, uint64_t( VsyncName[idx] ) );
@@ -249,6 +248,7 @@ void WINAPI EventRecordCallbackVsync( PEVENT_RECORD record )
 
 static void SetupVsync()
 {
+#if _WIN32_WINNT >= _WIN32_WINNT_WINBLUE
     const auto psz = sizeof( EVENT_TRACE_PROPERTIES ) + MAX_PATH;
     s_propVsync = (EVENT_TRACE_PROPERTIES*)tracy_malloc( psz );
     memset( s_propVsync, 0, sizeof( EVENT_TRACE_PROPERTIES ) );
@@ -326,6 +326,7 @@ static void SetupVsync()
         SetThreadName( "Tracy Vsync" );
         ProcessTrace( &s_traceHandleVsync2, 1, nullptr, nullptr );
     }, nullptr );
+#endif
 }
 
 bool SysTraceStart( int64_t& samplingPeriod )
@@ -367,8 +368,13 @@ bool SysTraceStart( int64_t& samplingPeriod )
     const auto psz = sizeof( EVENT_TRACE_PROPERTIES ) + sizeof( KERNEL_LOGGER_NAME );
     s_prop = (EVENT_TRACE_PROPERTIES*)tracy_malloc( psz );
     memset( s_prop, 0, sizeof( EVENT_TRACE_PROPERTIES ) );
-    ULONG flags = EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD;
+    ULONG flags = 0;
+#ifndef TRACY_NO_CONTEXT_SWITCH
+    flags = EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD;
+#endif
+#ifndef TRACY_NO_SAMPLING
     if( isOs64Bit ) flags |= EVENT_TRACE_FLAG_PROFILE;
+#endif
     s_prop->EnableFlags = flags;
     s_prop->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
     s_prop->Wnode.BufferSize = psz;
@@ -438,7 +444,9 @@ bool SysTraceStart( int64_t& samplingPeriod )
         return false;
     }
 
+#ifndef TRACY_NO_VSYNC_CAPTURE
     SetupVsync();
+#endif
 
     return true;
 }
@@ -593,6 +601,7 @@ void SysTraceSendExternalName( uint64_t thread )
 #    include <atomic>
 #    include <thread>
 #    include <linux/perf_event.h>
+#    include <linux/version.h>
 #    include <sys/mman.h>
 #    include <sys/ioctl.h>
 
@@ -648,7 +657,9 @@ static void SetupSampling( int64_t& samplingPeriod )
 
     pe.sample_freq = 10000;
     pe.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_CALLCHAIN;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION( 4, 8, 0 )
     pe.sample_max_stack = 127;
+#endif
     pe.exclude_callchain_kernel = 1;
 
     pe.disabled = 1;
@@ -722,6 +733,23 @@ static void SetupSampling( int64_t& samplingPeriod )
 
                         auto trace = (uint64_t*)tracy_malloc( ( 1 + cnt ) * sizeof( uint64_t ) );
                         s_ring[i].Read( trace+1, offset, sizeof( uint64_t ) * cnt );
+
+                        // remove non-canonical pointers
+                        do
+                        {
+                            const auto test = (int64_t)trace[cnt];
+                            const auto m1 = test >> 63;
+                            const auto m2 = test >> 47;
+                            if( m1 == m2 ) break;
+                        }
+                        while( --cnt > 0 );
+                        for( uint64_t j=1; j<cnt; j++ )
+                        {
+                            const auto test = (int64_t)trace[j];
+                            const auto m1 = test >> 63;
+                            const auto m2 = test >> 47;
+                            if( m1 != m2 ) trace[j] = 0;
+                        }
 
                         // skip kernel frames
                         uint64_t j;
