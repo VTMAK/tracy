@@ -14,6 +14,7 @@
 #include "TracyDecayValue.hpp"
 #include "TracyImGui.hpp"
 #include "TracyShortPtr.hpp"
+#include "TracySourceContents.hpp"
 #include "TracyTexture.hpp"
 #include "TracyUserData.hpp"
 #include "TracyVector.hpp"
@@ -28,10 +29,8 @@ namespace tracy
 {
 
 struct MemoryPage;
-struct QueueItem;
 class FileRead;
 class SourceView;
-struct ZoneTimeData;
 
 class View
 {
@@ -195,6 +194,7 @@ private:
     void DrawSampleParents();
     void DrawRanges();
     void DrawRangeEntry( Range& range, const char* label, uint32_t color, const char* popupLabel, int id );
+    void DrawSourceTooltip( const char* filename, uint32_t line, int before = 3, int after = 3, bool separateTooltip = true );
 
     void ListMemData( std::vector<const MemEvent*>& vec, std::function<void(const MemEvent*)> DrawAddress, const char* id = nullptr, int64_t startTime = -1, uint64_t pool = 0 );
 
@@ -202,7 +202,7 @@ private:
     unordered_flat_map<uint64_t, CallstackFrameTree> GetCallstackFrameTreeBottomUp( const MemData& mem ) const;
     unordered_flat_map<uint64_t, CallstackFrameTree> GetCallstackFrameTreeTopDown( const MemData& mem ) const;
     void DrawFrameTreeLevel( const unordered_flat_map<uint64_t, CallstackFrameTree>& tree, int& idx );
-    void DrawZoneList( const Vector<short_ptr<ZoneEvent>>& zones );
+    void DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones );
 
     void DrawInfoWindow();
     void DrawZoneInfoWindow();
@@ -243,7 +243,6 @@ private:
     void CallstackTooltip( uint32_t idx );
     void CrashTooltip();
 
-    int GetZoneDepth( const ZoneEvent& zone, uint64_t tid ) const;
     const ZoneEvent* GetZoneParent( const ZoneEvent& zone ) const;
     const ZoneEvent* GetZoneParent( const ZoneEvent& zone, uint64_t tid ) const;
     const GpuEvent* GetZoneParent( const GpuEvent& zone ) const;
@@ -365,6 +364,7 @@ private:
     DecayValue<uint64_t> m_drawThreadHighlight = 0;
     Annotation* m_selectedAnnotation = nullptr;
     bool m_reactToCrash = false;
+    bool m_reactToLostConnection = false;
 
     ImGuiTextFilter m_statisticsFilter;
     ImGuiTextFilter m_statisticsImageFilter;
@@ -385,18 +385,6 @@ private:
     bool m_showCpuDataWindow = false;
     bool m_showAnnotationList = false;
 
-    enum class CpuDataSortBy
-    {
-        Pid,
-        Name,
-        Time,
-        Regions,
-        Migrations
-    };
-
-    CpuDataSortBy m_cpuDataSort = CpuDataSortBy::Pid;
-
-    int m_statSort = 0;
     bool m_statSelf = true;
     bool m_statSampleTime = true;
     int m_statMode = 0;
@@ -428,12 +416,14 @@ private:
     Vector<const ZoneEvent*> m_zoneInfoStack;
     Vector<const GpuEvent*> m_gpuInfoStack;
 
+    SourceContents m_srcHintCache;
     std::unique_ptr<SourceView> m_sourceView;
     const char* m_sourceViewFile;
     bool m_uarchSet = false;
 
     ImFont* m_smallFont;
     ImFont* m_bigFont;
+    ImFont* m_fixedFont;
 
     float m_rootWidth, m_rootHeight;
     SetTitleCallback m_stcb;
@@ -487,7 +477,6 @@ private:
         enum : uint64_t { Unselected = std::numeric_limits<uint64_t>::max() - 1 };
         enum class GroupBy : int { Thread, UserText, ZoneName, Callstack, Parent, NoGrouping };
         enum class SortBy : int { Order, Count, Time, Mtpc };
-        enum class TableSortBy : int { Starttime, Runtime, Name };
 
         struct Group
         {
@@ -512,7 +501,6 @@ private:
         bool runningTime = false;
         GroupBy groupBy = GroupBy::Thread;
         SortBy sortBy = SortBy::Count;
-        TableSortBy tableSortBy = TableSortBy::Starttime;
         Region highlight;
         int64_t hlOrig_t0, hlOrig_t1;
         int64_t numBins = -1;
@@ -707,8 +695,6 @@ private:
     } m_playback;
 
     struct TimeDistribution {
-        enum class SortBy : int { Count, Time, Mtpc };
-        SortBy sortBy = SortBy::Time;
         bool runningTime = false;
         bool exclusiveTime = true;
         unordered_flat_map<int16_t, ZoneTimeData> data;

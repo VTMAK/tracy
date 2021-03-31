@@ -2,7 +2,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-#include <capstone/capstone.h>
+#include <capstone.h>
 
 #include "../imgui/imgui.h"
 #include "TracyCharUtil.hpp"
@@ -72,13 +72,8 @@ enum { JumpArrowBase = 9 };
 
 SourceView::SourceView( ImFont* font, GetWindowCallback gwcb )
     : m_font( font )
-    , m_file( nullptr )
-    , m_fileStringIdx( 0 )
     , m_symAddr( 0 )
     , m_targetAddr( 0 )
-    , m_data( nullptr )
-    , m_dataBuf( nullptr )
-    , m_dataSize( 0 )
     , m_targetLine( 0 )
     , m_selectedLine( 0 )
     , m_asmSelected( -1 )
@@ -296,11 +291,6 @@ SourceView::SourceView( ImFont* font, GetWindowCallback gwcb )
     s_regMapX86[X86_REG_K7] = RegsX86::k7;
 }
 
-SourceView::~SourceView()
-{
-    delete[] m_dataBuf;
-}
-
 static constexpr uint32_t PackCpuInfo( uint32_t cpuid )
 {
     return ( cpuid & 0xFFF ) | ( ( cpuid & 0xFFF0000 ) >> 4 );
@@ -407,7 +397,7 @@ void SourceView::OpenSource( const char* fileName, int line, const View& view, c
     m_asm.clear();
 
     ParseSource( fileName, worker, view );
-    assert( !m_lines.empty() );
+    assert( !m_source.empty() );
 }
 
 void SourceView::OpenSymbol( const char* fileName, int line, uint64_t baseAddr, uint64_t symAddr, const Worker& worker, const View& view )
@@ -429,7 +419,7 @@ void SourceView::OpenSymbol( const char* fileName, int line, uint64_t baseAddr, 
 
 void SourceView::SelectViewMode()
 {
-    if( !m_lines.empty() )
+    if( !m_source.empty() )
     {
         if( !m_asm.empty() )
         {
@@ -449,70 +439,10 @@ void SourceView::SelectViewMode()
 
 void SourceView::ParseSource( const char* fileName, const Worker& worker, const View& view )
 {
-    if( m_file != fileName )
+    if( m_source.filename() != fileName )
     {
         m_srcWidth = 0;
-        m_file = fileName;
-        m_fileStringIdx = worker.FindStringIdx( fileName );
-        m_lines.clear();
-        if( fileName )
-        {
-            uint32_t sz;
-            const auto srcCache = worker.GetSourceFileFromCache( fileName );
-            if( srcCache.data != nullptr )
-            {
-                m_data = srcCache.data;
-                sz = srcCache.len;
-            }
-            else
-            {
-                FILE* f = fopen( view.SourceSubstitution( fileName ), "rb" );
-                if( f )
-                {
-                    fseek( f, 0, SEEK_END );
-                    sz = ftell( f );
-                    fseek( f, 0, SEEK_SET );
-                    if( sz > m_dataSize )
-                    {
-                        delete[] m_dataBuf;
-                        m_dataBuf = new char[sz];
-                        m_dataSize = sz;
-                    }
-                    fread( m_dataBuf, 1, sz, f );
-                    m_data = m_dataBuf;
-                    fclose( f );
-                }
-                else
-                {
-                    m_file = nullptr;
-                }
-            }
-
-            if( m_file )
-            {
-                m_tokenizer.Reset();
-                auto txt = m_data;
-                for(;;)
-                {
-                    auto end = txt;
-                    while( *end != '\n' && *end != '\r' && end - m_data < sz ) end++;
-                    m_lines.emplace_back( Line { txt, end, Tokenize( txt, end ) } );
-                    if( end - m_data == sz ) break;
-                    if( *end == '\n' )
-                    {
-                        end++;
-                        if( end - m_data < sz && *end == '\r' ) end++;
-                    }
-                    else if( *end == '\r' )
-                    {
-                        end++;
-                        if( end - m_data < sz && *end == '\n' ) end++;
-                    }
-                    if( end - m_data == sz ) break;
-                    txt = end;
-                }
-            }
-        }
+        m_source.Parse( fileName, worker, view );
     }
 }
 
@@ -890,20 +820,20 @@ void SourceView::Render( const Worker& worker, View& view )
 
     if( m_symAddr == 0 )
     {
-        if( m_file ) TextFocused( ICON_FA_FILE " File:", m_file );
-        if( m_data == m_dataBuf )
+        if( m_source.filename() ) TextFocused( ICON_FA_FILE " File:", m_source.filename() );
+        if( m_source.is_cached() )
+        {
+            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
+            ImGui::SameLine();
+            ImGui::TextUnformatted( "Source file cached during profiling run" );
+        }
+        else
         {
             TextColoredUnformatted( ImVec4( 1.f, 1.f, 0.2f, 1.f ), ICON_FA_EXCLAMATION_TRIANGLE );
             ImGui::SameLine();
             TextColoredUnformatted( ImVec4( 1.f, 0.3f, 0.3f, 1.f ), "The source file contents might not reflect the actual profiled code!" );
             ImGui::SameLine();
             TextColoredUnformatted( ImVec4( 1.f, 1.f, 0.2f, 1.f ), ICON_FA_EXCLAMATION_TRIANGLE );
-        }
-        else
-        {
-            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
-            ImGui::SameLine();
-            ImGui::TextUnformatted( "Source file cached during profiling run" );
         }
 
         RenderSimpleSourceView();
@@ -920,12 +850,13 @@ void SourceView::RenderSimpleSourceView()
     ImGui::BeginChild( "##sourceView", ImVec2( 0, 0 ), true, ImGuiWindowFlags_HorizontalScrollbar );
     if( m_font ) ImGui::PushFont( m_font );
 
+    auto& lines = m_source.get();
     auto draw = ImGui::GetWindowDrawList();
     const auto wpos = ImGui::GetWindowPos();
     const auto wh = ImGui::GetWindowHeight();
     const auto ty = ImGui::GetFontSize();
     const auto ts = ImGui::CalcTextSize( " " ).x;
-    const auto lineCount = m_lines.size();
+    const auto lineCount = lines.size();
     const auto tmp = RealToString( lineCount );
     const auto maxLine = strlen( tmp );
     const auto lx = ts * maxLine + ty + round( ts*0.4f );
@@ -934,7 +865,7 @@ void SourceView::RenderSimpleSourceView()
     if( m_targetLine != 0 )
     {
         int lineNum = 1;
-        for( auto& line : m_lines )
+        for( auto& line : lines )
         {
             if( m_targetLine == lineNum )
             {
@@ -949,12 +880,12 @@ void SourceView::RenderSimpleSourceView()
     else
     {
         ImGuiListClipper clipper;
-        clipper.Begin( (int)m_lines.size() );
+        clipper.Begin( (int)lines.size() );
         while( clipper.Step() )
         {
             for( auto i=clipper.DisplayStart; i<clipper.DisplayEnd; i++ )
             {
-                RenderLine( m_lines[i], i+1, 0, 0, 0, nullptr );
+                RenderLine( lines[i], i+1, 0, 0, 0, nullptr );
             }
         }
     }
@@ -1136,7 +1067,7 @@ void SourceView::RenderSymbolView( const Worker& worker, View& view )
     TextDisabledUnformatted( "Mode:" );
     ImGui::SameLine();
     ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
-    if( !m_lines.empty() )
+    if( !m_source.empty() )
     {
         ImGui::RadioButton( "Source", &m_displayMode, DisplaySource );
         if( !m_asm.empty() )
@@ -1305,7 +1236,13 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
 {
     if( m_sourceFiles.empty() )
     {
-        if( m_data == m_dataBuf )
+        if( m_source.is_cached() )
+        {
+            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
+            ImGui::SameLine();
+            ImGui::TextUnformatted( "Source file cached during profiling run" );
+        }
+        else
         {
             TextColoredUnformatted( ImVec4( 1.f, 1.f, 0.2f, 1.f ), ICON_FA_EXCLAMATION_TRIANGLE );
             ImGui::SameLine();
@@ -1313,16 +1250,20 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
             ImGui::SameLine();
             TextColoredUnformatted( ImVec4( 1.f, 1.f, 0.2f, 1.f ), ICON_FA_EXCLAMATION_TRIANGLE );
         }
-        else
-        {
-            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
-            ImGui::SameLine();
-            ImGui::TextUnformatted( "Source file cached during profiling run" );
-        }
     }
     else
     {
-        if( m_data == m_dataBuf )
+        if( m_source.is_cached() )
+        {
+            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
+            if( ImGui::IsItemHovered() )
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted( "Source file cached during profiling run" );
+                ImGui::EndTooltip();
+            }
+        }
+        else
         {
             TextColoredUnformatted( ImVec4( 1.f, 1.f, 0.2f, 1.f ), ICON_FA_EXCLAMATION_TRIANGLE );
             if( ImGui::IsItemHovered() )
@@ -1336,25 +1277,15 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
                 ImGui::EndTooltip();
             }
         }
-        else
-        {
-            TextColoredUnformatted( ImVec4( 0.4f, 0.8f, 0.4f, 1.f ), ICON_FA_DATABASE );
-            if( ImGui::IsItemHovered() )
-            {
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted( "Source file cached during profiling run" );
-                ImGui::EndTooltip();
-            }
-        }
         ImGui::SameLine();
         TextDisabledUnformatted( ICON_FA_FILE " File:" );
         ImGui::SameLine();
-        const auto fileColor = GetHsvColor( m_fileStringIdx, 0 );
+        const auto fileColor = GetHsvColor( m_source.idx(), 0 );
         SmallColorBox( fileColor );
         ImGui::SameLine();
         ImGui::SetNextItemWidth( -1 );
         ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
-        if( ImGui::BeginCombo( "##fileList", m_file, ImGuiComboFlags_HeightLarge ) )
+        if( ImGui::BeginCombo( "##fileList", m_source.filename(), ImGuiComboFlags_HeightLarge ) )
         {
             if( m_asm.empty() )
             {
@@ -1367,7 +1298,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
                     if( SourceFileValid( fstr, worker.GetCaptureTime(), view, worker ) )
                     {
                         ImGui::PushID( v.first );
-                        if( ImGui::Selectable( fstr, fstr == m_file ) )
+                        if( ImGui::Selectable( fstr, fstr == m_source.filename() ) )
                         {
                             ParseSource( fstr, worker, view );
                             m_targetLine = v.second;
@@ -1452,7 +1383,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
                     if( SourceFileValid( fstr, worker.GetCaptureTime(), view, worker ) )
                     {
                         ImGui::PushID( v.first );
-                        if( ImGui::Selectable( fstr, fstr == m_file, ImGuiSelectableFlags_SpanAllColumns ) )
+                        if( ImGui::Selectable( fstr, fstr == m_source.filename(), ImGuiSelectableFlags_SpanAllColumns ) )
                         {
                             uint32_t line = 0;
                             for( auto& file : m_sourceFiles )
@@ -1487,12 +1418,13 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
     ImGui::BeginChild( "##sourceView", ImVec2( 0, -bottom ), true, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_HorizontalScrollbar );
     if( m_font ) ImGui::PushFont( m_font );
 
+    auto& lines = m_source.get();
     auto draw = ImGui::GetWindowDrawList();
     const auto wpos = ImGui::GetWindowPos() - ImVec2( ImGui::GetCurrentWindowRead()->Scroll.x, 0 );
     const auto wh = ImGui::GetWindowHeight();
     const auto ty = ImGui::GetFontSize();
     const auto ts = ImGui::CalcTextSize( " " ).x;
-    const auto lineCount = m_lines.size();
+    const auto lineCount = lines.size();
     const auto tmp = RealToString( lineCount );
     const auto maxLine = strlen( tmp );
     auto lx = ts * maxLine + ty + round( ts*0.4f );
@@ -1509,7 +1441,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
     if( m_targetLine != 0 )
     {
         int lineNum = 1;
-        for( auto& line : m_lines )
+        for( auto& line : lines )
         {
             if( m_targetLine == lineNum )
             {
@@ -1524,14 +1456,14 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
     else
     {
         ImGuiListClipper clipper;
-        clipper.Begin( (int)m_lines.size() );
+        clipper.Begin( (int)lines.size() );
         while( clipper.Step() )
         {
             if( iptotal == 0 )
             {
                 for( auto i=clipper.DisplayStart; i<clipper.DisplayEnd; i++ )
                 {
-                    RenderLine( m_lines[i], i+1, 0, 0, 0, &worker );
+                    RenderLine( lines[i], i+1, 0, 0, 0, &worker );
                 }
             }
             else
@@ -1540,7 +1472,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
                 {
                     auto it = ipcount.find( i+1 );
                     const auto ipcnt = it == ipcount.end() ? 0 : it->second;
-                    RenderLine( m_lines[i], i+1, ipcnt, iptotal, ipmax, &worker );
+                    RenderLine( lines[i], i+1, ipcnt, iptotal, ipmax, &worker );
                 }
             }
         }
@@ -1554,23 +1486,23 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
         ImGui::PushClipRect( rect.Min, rect.Max, false );
         if( m_selectedLine != 0 )
         {
-            const auto ly = round( rect.Min.y + ( m_selectedLine - 0.5f ) / m_lines.size() * rect.GetHeight() );
+            const auto ly = round( rect.Min.y + ( m_selectedLine - 0.5f ) / lines.size() * rect.GetHeight() );
             draw->AddLine( ImVec2( rect.Min.x, ly ), ImVec2( rect.Max.x, ly ), 0x8899994C, 3 );
         }
-        if( m_fileStringIdx == m_hoveredSource && m_hoveredLine != 0 )
+        if( m_source.idx() == m_hoveredSource && m_hoveredLine != 0 )
         {
-            const auto ly = round( rect.Min.y + ( m_hoveredLine - 0.5f ) / m_lines.size() * rect.GetHeight() );
+            const auto ly = round( rect.Min.y + ( m_hoveredLine - 0.5f ) / lines.size() * rect.GetHeight() );
             draw->AddLine( ImVec2( rect.Min.x, ly ), ImVec2( rect.Max.x, ly ), 0x88888888, 3 );
         }
 
         std::vector<std::pair<uint64_t, uint32_t>> ipData;
         ipData.reserve( ipcount.size() );
         for( auto& v : ipcount ) ipData.emplace_back( v.first, v.second );
-        for( uint32_t lineNum = 1; lineNum <= m_lines.size(); lineNum++ )
+        for( uint32_t lineNum = 1; lineNum <= lines.size(); lineNum++ )
         {
             if( ipcount.find( lineNum ) == ipcount.end() )
             {
-                auto addresses = worker.GetAddressesForLocation( m_fileStringIdx, lineNum );
+                auto addresses = worker.GetAddressesForLocation( m_source.idx(), lineNum );
                 if( addresses )
                 {
                     for( auto& addr : *addresses )
@@ -1586,7 +1518,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
         }
         pdqsort_branchless( ipData.begin(), ipData.end(), []( const auto& l, const auto& r ) { return l.first < r.first; } );
 
-        const auto step = uint32_t( m_lines.size() * 2 / rect.GetHeight() );
+        const auto step = uint32_t( lines.size() * 2 / rect.GetHeight() );
         const auto x14 = round( rect.Min.x + rect.GetWidth() * 0.4f );
         const auto x34 = round( rect.Min.x + rect.GetWidth() * 0.6f );
 
@@ -1600,7 +1532,7 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
                 ipSum += it->second;
                 ++it;
             }
-            const auto ly = round( rect.Min.y + float( firstLine ) / m_lines.size() * rect.GetHeight() );
+            const auto ly = round( rect.Min.y + float( firstLine ) / lines.size() * rect.GetHeight() );
             const uint32_t color = ipSum == 0 ? 0x22FFFFFF : GetHotnessColor( ipSum, ipmax );
             draw->AddRectFilled( ImVec2( x14, ly ), ImVec2( x34, ly+3 ), color );
         }
@@ -1652,9 +1584,10 @@ void SourceView::RenderSymbolSourceView( uint32_t iptotal, unordered_flat_map<ui
     }
 }
 
-static int PrintHexBytes( char* buf, const uint8_t* bytes, size_t len )
+static constexpr char HexPrint[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+
+static int PrintHexBytesRaw( char* buf, const uint8_t* bytes, size_t len )
 {
-    static constexpr char HexPrint[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
     const auto start = buf;
     for( size_t i=0; i<len; i++ )
     {
@@ -1665,6 +1598,37 @@ static int PrintHexBytes( char* buf, const uint8_t* bytes, size_t len )
     }
     *--buf = '\0';
     return buf - start;
+}
+
+static int PrintHexBytesArm( char* buf, const uint8_t* bytes )
+{
+    const auto start = buf;
+    for( int i=3; i>=0; i-- )
+    {
+        const auto byte = bytes[i];
+        *buf++ = HexPrint[byte >> 4];
+        *buf++ = HexPrint[byte & 0xF];
+        *buf++ = ' ';
+    }
+    *--buf = '\0';
+    return buf - start;
+}
+
+static int PrintHexBytes( char* buf, const uint8_t* bytes, size_t len, CpuArchitecture arch )
+{
+    switch( arch )
+    {
+    case CpuArchX86:
+    case CpuArchX64:
+        return PrintHexBytesRaw( buf, bytes, len );
+    case CpuArchArm32:
+    case CpuArchArm64:
+        assert( len == 4 );
+        return PrintHexBytesArm( buf, bytes );
+    default:
+        assert( false );
+        return 0;
+    }
 }
 
 uint64_t SourceView::RenderSymbolAsmView( uint32_t iptotal, unordered_flat_map<uint64_t, uint32_t> ipcount, uint32_t ipmax, const Worker& worker, View& view )
@@ -1686,7 +1650,7 @@ uint64_t SourceView::RenderSymbolAsmView( uint32_t iptotal, unordered_flat_map<u
             auto bytesLeft = std::min( 16u, m_codeLen - m_disasmFail );
             auto code = worker.GetSymbolCode( m_baseAddr, m_codeLen );
             assert( code );
-            PrintHexBytes( tmp, (const uint8_t*)code, bytesLeft );
+            PrintHexBytesRaw( tmp, (const uint8_t*)code, bytesLeft );
             TextFocused( "Failure bytes:", tmp );
             TextDisabledUnformatted( "Click to copy to clipboard." );
             ImGui::EndTooltip();
@@ -2207,26 +2171,13 @@ static bool PrintPercentage( float val, uint32_t col = 0xFFFFFFFF )
     return ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect( wpos, wpos + ImVec2( stw * 7, ty ) );
 }
 
-static const ImVec4 SyntaxColors[] = {
-    { 0.7f,  0.7f,  0.7f,  1 },    // default
-    { 0.45f, 0.68f, 0.32f, 1 },    // comment
-    { 0.72f, 0.37f, 0.12f, 1 },    // preprocessor
-    { 0.64f, 0.64f, 1,     1 },    // string
-    { 0.64f, 0.82f, 1,     1 },    // char literal
-    { 1,     0.91f, 0.53f, 1 },    // keyword
-    { 0.81f, 0.6f,  0.91f, 1 },    // number
-    { 0.9f,  0.9f,  0.9f,  1 },    // punctuation
-    { 0.78f, 0.46f, 0.75f, 1 },    // type
-    { 0.21f, 0.69f, 0.89f, 1 },    // special
-};
-
-void SourceView::RenderLine( const Line& line, int lineNum, uint32_t ipcnt, uint32_t iptotal, uint32_t ipmax, const Worker* worker )
+void SourceView::RenderLine( const Tokenizer::Line& line, int lineNum, uint32_t ipcnt, uint32_t iptotal, uint32_t ipmax, const Worker* worker )
 {
     const auto ty = ImGui::GetFontSize();
     auto draw = ImGui::GetWindowDrawList();
     const auto w = std::max( m_srcWidth, ImGui::GetWindowWidth() );
     const auto wpos = ImGui::GetCursorScreenPos();
-    if( m_fileStringIdx == m_hoveredSource && lineNum == m_hoveredLine )
+    if( m_source.idx() == m_hoveredSource && lineNum == m_hoveredLine )
     {
         draw->AddRectFilled( wpos, wpos + ImVec2( w, ty+1 ), 0x22FFFFFF );
     }
@@ -2316,7 +2267,7 @@ void SourceView::RenderLine( const Line& line, int lineNum, uint32_t ipcnt, uint
         ImGui::SameLine( 0, ty );
     }
 
-    const auto lineCount = m_lines.size();
+    const auto lineCount = m_source.get().size();
     const auto tmp = RealToString( lineCount );
     const auto maxLine = strlen( tmp );
     const auto lineString = RealToString( lineNum );
@@ -2332,7 +2283,7 @@ void SourceView::RenderLine( const Line& line, int lineNum, uint32_t ipcnt, uint
     {
         assert( worker );
         const auto stw = ImGui::CalcTextSize( " " ).x;
-        auto addresses = worker->GetAddressesForLocation( m_fileStringIdx, lineNum );
+        auto addresses = worker->GetAddressesForLocation( m_source.idx(), lineNum );
         if( addresses )
         {
             for( auto& addr : *addresses )
@@ -2390,7 +2341,7 @@ void SourceView::RenderLine( const Line& line, int lineNum, uint32_t ipcnt, uint
         }
         else
         {
-            SelectAsmLinesHover( m_fileStringIdx, lineNum, *worker );
+            SelectAsmLinesHover( m_source.idx(), lineNum, *worker );
         }
     }
 
@@ -2431,10 +2382,37 @@ void SourceView::RenderAsmLine( AsmLine& line, uint32_t ipcnt, uint32_t iptotal,
             auto sit = m_asmSampleSelect.find( idx );
             if( PrintPercentage( 100.f * ipcnt / iptotal, sit == m_asmSampleSelect.end() ? 0xFFFFFFFF : 0xFF8888FF ) )
             {
+                uint64_t symAddrParents = m_baseAddr;
+                auto inlineList = worker.GetInlineSymbolList( m_baseAddr, m_codeLen );
+                if( inlineList )
+                {
+                    const auto cfi = worker.PackPointer( line.addr );
+                    const auto symEnd = m_baseAddr + m_codeLen;
+                    while( *inlineList < symEnd )
+                    {
+                        auto ipmap = worker.GetSymbolInstructionPointers( *inlineList );
+                        if( ipmap )
+                        {
+                            if( ipmap->find( cfi ) != ipmap->end() )
+                            {
+                                symAddrParents = *inlineList;
+                                break;
+                            }
+                        }
+                        inlineList++;
+                    }
+                }
+                const auto& stats = *worker.GetSymbolStats( symAddrParents );
+                assert( !stats.parents.empty() );
+
                 if( m_font ) ImGui::PopFont();
                 ImGui::BeginTooltip();
                 TextFocused( "Time:", TimeToString( ipcnt * worker.GetSamplingPeriod() ) );
                 TextFocused( "Sample count:", RealToString( ipcnt ) );
+                ImGui::Separator();
+                TextFocused( "Entry call stacks:", RealToString( stats.parents.size() ) );
+                ImGui::SameLine();
+                TextDisabledUnformatted( "(middle click to view)" );
                 ImGui::EndTooltip();
                 if( m_font ) ImGui::PushFont( m_font );
 
@@ -2493,35 +2471,7 @@ void SourceView::RenderAsmLine( AsmLine& line, uint32_t ipcnt, uint32_t iptotal,
                 }
                 else if( ImGui::IsMouseClicked( 2 ) )
                 {
-                    const auto cfi = worker.PackPointer( line.addr );
-                    auto inlineList = worker.GetInlineSymbolList( m_baseAddr, m_codeLen );
-                    if( inlineList )
-                    {
-                        bool found = false;
-                        const auto symEnd = m_baseAddr + m_codeLen;
-                        while( *inlineList < symEnd )
-                        {
-                            auto ipmap = worker.GetSymbolInstructionPointers( *inlineList );
-                            if( ipmap )
-                            {
-                                if( ipmap->find( cfi ) != ipmap->end() )
-                                {
-                                    view.ShowSampleParents( *inlineList );
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            inlineList++;
-                        }
-                        if( !found )
-                        {
-                            view.ShowSampleParents( m_baseAddr );
-                        }
-                    }
-                    else
-                    {
-                        view.ShowSampleParents( m_baseAddr );
-                    }
+                    view.ShowSampleParents( symAddrParents );
                 }
             }
             draw->AddLine( wpos + ImVec2( 0, 1 ), wpos + ImVec2( 0, ty-2 ), GetHotnessColor( ipcnt, ipmax ) );
@@ -2594,11 +2544,65 @@ void SourceView::RenderAsmLine( AsmLine& line, uint32_t ipcnt, uint32_t iptotal,
                 ImGui::BeginTooltip();
                 TextFocused( "File:", fileName );
                 TextFocused( "Line:", RealToString( srcline ) );
+                if( SourceFileValid( fileName, worker.GetCaptureTime(), view, worker ) )
+                {
+                    m_sourceTooltip.Parse( fileName, worker, view );
+                    if( !m_sourceTooltip.empty() )
+                    {
+                        ImGui::Separator();
+                        if( m_font ) ImGui::PushFont( m_font );
+                        auto& lines = m_sourceTooltip.get();
+                        const int start = std::max( 0, (int)srcline - 4 );
+                        const int end = std::min<int>( m_sourceTooltip.get().size(), srcline + 3 );
+                        bool first = true;
+                        int bottomEmpty = 0;
+                        for( int i=start; i<end; i++ )
+                        {
+                            auto& line = lines[i];
+                            if( line.begin == line.end )
+                            {
+                                if( !first ) bottomEmpty++;
+                            }
+                            else
+                            {
+                                first = false;
+                                while( bottomEmpty > 0 )
+                                {
+                                    ImGui::TextUnformatted( "" );
+                                    bottomEmpty--;
+                                }
+
+                                auto ptr = line.begin;
+                                auto it = line.tokens.begin();
+                                while( ptr < line.end )
+                                {
+                                    if( it == line.tokens.end() )
+                                    {
+                                        ImGui::TextUnformatted( ptr, line.end );
+                                        ImGui::SameLine( 0, 0 );
+                                        break;
+                                    }
+                                    if( ptr < it->begin )
+                                    {
+                                        ImGui::TextUnformatted( ptr, it->begin );
+                                        ImGui::SameLine( 0, 0 );
+                                    }
+                                    TextColoredUnformatted( i == srcline-1 ? SyntaxColors[(int)it->color] : SyntaxColorsDimmed[(int)it->color], it->begin, it->end );
+                                    ImGui::SameLine( 0, 0 );
+                                    ptr = it->end;
+                                    ++it;
+                                }
+                                ImGui::ItemSize( ImVec2( 0, 0 ), 0 );
+                            }
+                        }
+                        if( m_font ) ImGui::PopFont();
+                    }
+                }
                 ImGui::EndTooltip();
                 if( m_font ) ImGui::PushFont( m_font );
                 if( ImGui::IsItemClicked( 0 ) || ImGui::IsItemClicked( 1 ) )
                 {
-                    if( m_file == fileName )
+                    if( m_source.filename() == fileName )
                     {
                         if( ImGui::IsMouseClicked( 1 ) ) m_targetLine = srcline;
                         SelectLine( srcline, &worker, false );
@@ -2639,7 +2643,7 @@ void SourceView::RenderAsmLine( AsmLine& line, uint32_t ipcnt, uint32_t iptotal,
         auto code = (const uint8_t*)worker.GetSymbolCode( m_baseAddr, m_codeLen );
         assert( code );
         char tmp[64];
-        const auto len = PrintHexBytes( tmp, code + line.addr - m_baseAddr, line.len );
+        const auto len = PrintHexBytes( tmp, code + line.addr - m_baseAddr, line.len, worker.GetCpuArch() );
         ImGui::SameLine();
         TextColoredUnformatted( ImVec4( 0.5, 0.5, 1, 1 ), tmp );
         ImGui::SameLine( 0, 0 );
@@ -3086,7 +3090,7 @@ void SourceView::SelectLine( uint32_t line, const Worker* worker, bool changeAsm
     m_selectedLine = line;
     if( m_symAddr == 0 ) return;
     assert( worker );
-    SelectAsmLines( m_fileStringIdx, line, *worker, changeAsmLine, targetAddr );
+    SelectAsmLines( m_source.idx(), line, *worker, changeAsmLine, targetAddr );
 }
 
 void SourceView::SelectAsmLines( uint32_t file, uint32_t line, const Worker& worker, bool changeAsmLine, uint64_t targetAddr )
@@ -3142,6 +3146,7 @@ void SourceView::SelectAsmLinesHover( uint32_t file, uint32_t line, const Worker
 
 void SourceView::GatherIpStats( uint64_t addr, uint32_t& iptotalSrc, uint32_t& iptotalAsm, unordered_flat_map<uint64_t, uint32_t>& ipcountSrc, unordered_flat_map<uint64_t, uint32_t>& ipcountAsm, uint32_t& ipmaxSrc, uint32_t& ipmaxAsm, const Worker& worker, bool limitView, const View& view )
 {
+    auto filename = m_source.filename();
     if( limitView )
     {
         auto vec = worker.GetSamplesForSymbol( addr );
@@ -3152,13 +3157,13 @@ void SourceView::GatherIpStats( uint64_t addr, uint32_t& iptotalSrc, uint32_t& i
         iptotalAsm += end - it;
         while( it != end )
         {
-            if( m_file )
+            if( filename )
             {
                 auto frame = worker.GetCallstackFrame( it->ip );
                 if( frame )
                 {
                     auto ffn = worker.GetString( frame->data[0].file );
-                    if( strcmp( ffn, m_file ) == 0 )
+                    if( strcmp( ffn, filename ) == 0 )
                     {
                         const auto line = frame->data[0].line;
                         if( line != 0 )
@@ -3204,13 +3209,13 @@ void SourceView::GatherIpStats( uint64_t addr, uint32_t& iptotalSrc, uint32_t& i
         if( !ipmap ) return;
         for( auto& ip : *ipmap )
         {
-            if( m_file )
+            if( filename )
             {
                 auto frame = worker.GetCallstackFrame( ip.first );
                 if( frame )
                 {
                     auto ffn = worker.GetString( frame->data[0].file );
-                    if( strcmp( ffn, m_file ) == 0 )
+                    if( strcmp( ffn, filename ) == 0 )
                     {
                         const auto line = frame->data[0].line;
                         if( line != 0 )
@@ -3261,306 +3266,6 @@ uint32_t SourceView::CountAsmIpStats( uint64_t addr, const Worker& worker, bool 
         for( auto& ip : *ipmap ) cnt += ip.second;
         return cnt;
     }
-}
-
-namespace {
-static unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> GetKeywords()
-{
-    unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> ret;
-    for( auto& v : {
-        "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel", "atomic_commit", "atomic_noexcept",
-        "bitand", "bitor", "break", "case", "catch", "class", "compl", "concept", "const", "consteval",
-        "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype",
-        "default", "delete", "do", "dynamic_cast", "else", "enum", "explicit", "export", "extern", "for",
-        "friend", "if", "inline", "mutable", "namespace", "new", "noexcept", "not", "not_eq", "operator",
-        "or", "or_eq", "private", "protected", "public", "reflexpr", "register", "reinterpret_cast",
-        "return", "requires", "sizeof", "static", "static_assert", "static_cast", "struct", "switch",
-        "synchronized", "template", "thread_local", "throw", "try", "typedef", "typeid", "typename",
-        "union", "using", "virtual", "volatile", "while", "xor", "xor_eq", "override", "final", "import",
-        "module", "transaction_safe", "transaction_safe_dynamic" } )
-    {
-        ret.insert( v );
-    }
-    return ret;
-}
-static unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> GetTypes()
-{
-    unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> ret;
-    for( auto& v : {
-        "bool", "char", "char8_t", "char16_t", "char32_t", "double", "float", "int", "long", "short", "signed",
-        "unsigned", "void", "wchar_t", "size_t", "int8_t", "int16_t", "int32_t", "int64_t", "int_fast8_t",
-        "int_fast16_t", "int_fast32_t", "int_fast64_t", "int_least8_t", "int_least16_t", "int_least32_t",
-        "int_least64_t", "intmax_t", "intptr_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "uint_fast8_t",
-        "uint_fast16_t", "uint_fast32_t", "uint_fast64_t", "uint_least8_t", "uint_least16_t", "uint_least32_t",
-        "uint_least64_t", "uintmax_t", "uintptr_t", "type_info", "bad_typeid", "bad_cast", "type_index",
-        "clock_t", "time_t", "tm", "timespec", "ptrdiff_t", "nullptr_t", "max_align_t", "auto",
-
-        "__m64", "__m128", "__m128i", "__m128d", "__m256", "__m256i", "__m256d", "__m512", "__m512i",
-        "__m512d", "__mmask8", "__mmask16", "__mmask32", "__mmask64",
-
-        "int8x8_t", "int16x4_t", "int32x2_t", "int64x1_t", "uint8x8_t", "uint16x4_t", "uint32x2_t",
-        "uint64x1_t", "float32x2_t", "poly8x8_t", "poly16x4_t", "int8x16_t", "int16x8_t", "int32x4_t",
-        "int64x2_t", "uint8x16_t", "uint16x8_t", "uint32x4_t", "uint64x2_t", "float32x4_t", "poly8x16_t",
-        "poly16x8_t",
-
-        "int8x8x2_t", "int16x4x2_t", "int32x2x2_t", "int64x1x2_t", "uint8x8x2_t", "uint16x4x2_t",
-        "uint32x2x2_t", "uint64x1x2_t", "float32x2x2_t", "poly8x8x2_t", "poly16x4x2_t", "int8x16x2_t",
-        "int16x8x2_t", "int32x4x2_t", "int64x2x2_t", "uint8x16x2_t", "uint16x8x2_t", "uint32x4x2_t",
-        "uint64x2x2_t", "float32x4x2_t", "poly8x16x2_t", "poly16x8x2_t",
-
-        "int8x8x3_t", "int16x4x3_t", "int32x2x3_t", "int64x1x3_t", "uint8x8x3_t", "uint16x4x3_t",
-        "uint32x2x3_t", "uint64x1x3_t", "float32x2x3_t", "poly8x8x3_t", "poly16x4x3_t", "int8x16x3_t",
-        "int16x8x3_t", "int32x4x3_t", "int64x2x3_t", "uint8x16x3_t", "uint16x8x3_t", "uint32x4x3_t",
-        "uint64x2x3_t", "float32x4x3_t", "poly8x16x3_t", "poly16x8x3_t",
-
-        "int8x8x4_t", "int16x4x4_t", "int32x2x4_t", "int64x1x4_t", "uint8x8x4_t", "uint16x4x4_t",
-        "uint32x2x4_t", "uint64x1x4_t", "float32x2x4_t", "poly8x8x4_t", "poly16x4x4_t", "int8x16x4_t",
-        "int16x8x4_t", "int32x4x4_t", "int64x2x4_t", "uint8x16x4_t", "uint16x8x4_t", "uint32x4x4_t",
-        "uint64x2x4_t", "float32x4x4_t", "poly8x16x4_t", "poly16x8x4_t" } )
-    {
-        ret.insert( v );
-    }
-    return ret;
-}
-static unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> GetSpecial()
-{
-    unordered_flat_set<const char*, charutil::Hasher, charutil::Comparator> ret;
-    for( auto& v : { "this", "nullptr", "true", "false", "goto", "NULL" } )
-    {
-        ret.insert( v );
-    }
-    return ret;
-}
-}
-
-static bool TokenizeNumber( const char*& begin, const char* end )
-{
-    const bool startNum = *begin >= '0' && *begin <= '9';
-    if( *begin != '+' && *begin != '-' && !startNum ) return false;
-    begin++;
-    bool hasNum = startNum;
-    while( begin < end && ( ( *begin >= '0' && *begin <= '9' ) || *begin == '\'' ) )
-    {
-        hasNum = true;
-        begin++;
-    }
-    if( !hasNum ) return false;
-    bool isFloat = false, isBinary = false;
-    if( begin < end )
-    {
-        if( *begin == '.' )
-        {
-            isFloat = true;
-            begin++;
-            while( begin < end && ( ( *begin >= '0' && *begin <= '9' ) || *begin == '\'' ) ) begin++;
-        }
-        else if( *begin == 'x' || *begin == 'X' )
-        {
-            // hexadecimal
-            begin++;
-            while( begin < end && ( ( *begin >= '0' && *begin <= '9' ) || ( *begin >= 'a' && *begin <= 'f' ) || ( *begin >= 'A' && *begin <= 'F' ) || *begin == '\'' ) ) begin++;
-        }
-        else if( *begin == 'b' || *begin == 'B' )
-        {
-            isBinary = true;
-            begin++;
-            while( begin < end && ( ( *begin == '0' || *begin == '1' ) || *begin == '\'' ) ) begin++;
-        }
-    }
-    if( !isBinary )
-    {
-        if( begin < end && ( *begin == 'e' || *begin == 'E' || *begin == 'p' || *begin == 'P' ) )
-        {
-            isFloat = true;
-            begin++;
-            if( begin < end && ( *begin == '+' || *begin == '-' ) ) begin++;
-            bool hasDigits = false;
-            while( begin < end && ( ( *begin >= '0' && *begin <= '9' ) || ( *begin >= 'a' && *begin <= 'f' ) || ( *begin >= 'A' && *begin <= 'F' ) || *begin == '\'' ) )
-            {
-                hasDigits = true;
-                begin++;
-            }
-            if( !hasDigits ) return false;
-        }
-        if( begin < end && ( *begin == 'f' || *begin == 'F' || *begin == 'l' || *begin == 'L' ) ) begin++;
-    }
-    if( !isFloat )
-    {
-        while( begin < end && ( *begin == 'u' || *begin == 'U' || *begin == 'l' || *begin == 'L' ) ) begin++;
-    }
-    return true;
-}
-
-SourceView::TokenColor SourceView::IdentifyToken( const char*& begin, const char* end )
-{
-    static const auto s_keywords = GetKeywords();
-    static const auto s_types = GetTypes();
-    static const auto s_special = GetSpecial();
-
-    if( *begin == '"' )
-    {
-        begin++;
-        while( begin < end )
-        {
-            if( *begin == '"' )
-            {
-                begin++;
-                break;
-            }
-            begin += 1 + ( *begin == '\\' && end - begin > 1 && *(begin+1) == '"' );
-        }
-        return TokenColor::String;
-    }
-    if( *begin == '\'' )
-    {
-        begin++;
-        if( begin < end && *begin == '\\' ) begin++;
-        if( begin < end ) begin++;
-        if( begin < end && *begin == '\'' ) begin++;
-        return TokenColor::CharacterLiteral;
-    }
-    if( ( *begin >= 'a' && *begin <= 'z' ) || ( *begin >= 'A' && *begin <= 'Z' ) || *begin == '_' )
-    {
-        const char* tmp = begin;
-        begin++;
-        while( begin < end && ( ( *begin >= 'a' && *begin <= 'z' ) || ( *begin >= 'A' && *begin <= 'Z' ) || ( *begin >= '0' && *begin <= '9' ) || *begin == '_' ) ) begin++;
-        if( begin - tmp <= 24 )
-        {
-            char buf[25];
-            memcpy( buf, tmp, begin-tmp );
-            buf[begin-tmp] = '\0';
-            if( s_keywords.find( buf ) != s_keywords.end() ) return TokenColor::Keyword;
-            if( s_types.find( buf ) != s_types.end() ) return TokenColor::Type;
-            if( s_special.find( buf ) != s_special.end() ) return TokenColor::Special;
-        }
-        return TokenColor::Default;
-    }
-    const char* tmp = begin;
-    if( TokenizeNumber( begin, end ) ) return TokenColor::Number;
-    begin = tmp;
-    if( *begin == '/' && end - begin > 1 )
-    {
-        if( *(begin+1) == '/' )
-        {
-            begin = end;
-            return TokenColor::Comment;
-        }
-        if( *(begin+1) == '*' )
-        {
-            begin += 2;
-            for(;;)
-            {
-                while( begin < end && *begin != '*' ) begin++;
-                if( begin == end )
-                {
-                    m_tokenizer.isInComment = true;
-                    return TokenColor::Comment;
-                }
-                begin++;
-                if( begin < end && *begin == '/' )
-                {
-                    begin++;
-                    return TokenColor::Comment;
-                }
-            }
-        }
-    }
-    while( begin < end )
-    {
-        switch( *begin )
-        {
-        case '[':
-        case ']':
-        case '{':
-        case '}':
-        case '!':
-        case '%':
-        case '^':
-        case '&':
-        case '*':
-        case '(':
-        case ')':
-        case '-':
-        case '+':
-        case '=':
-        case '~':
-        case '|':
-        case '<':
-        case '>':
-        case '?':
-        case ':':
-        case '/':
-        case ';':
-        case ',':
-        case '.':
-            begin++;
-            break;
-        default:
-            goto out;
-        }
-    }
-out:
-    if( begin != tmp ) return TokenColor::Punctuation;
-    begin = end;
-    return TokenColor::Default;
-}
-
-std::vector<SourceView::Token> SourceView::Tokenize( const char* begin, const char* end )
-{
-    std::vector<Token> ret;
-    if( m_tokenizer.isInPreprocessor )
-    {
-        if( begin == end )
-        {
-            m_tokenizer.isInPreprocessor = false;
-            return ret;
-        }
-        if( *(end-1) != '\\' ) m_tokenizer.isInPreprocessor = false;
-        ret.emplace_back( Token { begin, end, TokenColor::Preprocessor } );
-        return ret;
-    }
-    const bool first = !m_tokenizer.isInComment;
-    while( begin != end )
-    {
-        if( m_tokenizer.isInComment )
-        {
-            const auto pos = begin;
-            for(;;)
-            {
-                while( begin != end && *begin != '*' ) begin++;
-                begin++;
-                if( begin < end )
-                {
-                    if( *begin == '/' )
-                    {
-                        begin++;
-                        ret.emplace_back( Token { pos, begin, TokenColor::Comment } );
-                        m_tokenizer.isInComment = false;
-                        break;
-                    }
-                }
-                else
-                {
-                    ret.emplace_back( Token { pos, end, TokenColor::Comment } );
-                    return ret;
-                }
-            }
-        }
-        else
-        {
-            while( begin != end && isspace( *begin ) ) begin++;
-            if( first && begin < end && *begin == '#' )
-            {
-                if( *(end-1) == '\\' ) m_tokenizer.isInPreprocessor = true;
-                ret.emplace_back( Token { begin, end, TokenColor::Preprocessor } );
-                return ret;
-            }
-            const auto pos = begin;
-            const auto col = IdentifyToken( begin, end );
-            ret.emplace_back( Token { pos, begin, col } );
-        }
-    }
-    return ret;
 }
 
 void SourceView::SelectMicroArchitecture( const char* moniker )
@@ -3753,6 +3458,7 @@ void SourceView::CheckWrite( size_t line, RegsX86 reg, size_t limit )
     }
 }
 
+#ifndef TRACY_NO_FILESELECTOR
 void SourceView::Save( const Worker& worker, size_t start, size_t stop )
 {
     assert( start < m_asm.size() );
@@ -3835,5 +3541,6 @@ void SourceView::Save( const Worker& worker, size_t start, size_t stop )
         }
     }
 }
+#endif
 
 }

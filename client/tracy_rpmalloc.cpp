@@ -1709,7 +1709,7 @@ rp_thread_destructor(void* value) {
 #include <errno.h>
 
 //! Initialize the allocator and setup global data
-extern inline int
+TRACY_API int
 rpmalloc_initialize(void) {
 // VRV PATCH to help multiple threads launch at the same time
 	static std::mutex mutx;
@@ -1914,7 +1914,7 @@ rpmalloc_initialize_config(const rpmalloc_config_t* config) {
 }
 
 //! Finalize the allocator
-void
+TRACY_API void
 rpmalloc_finalize(void) {
 	atomic_thread_fence_acquire();
 
@@ -2002,7 +2002,7 @@ rpmalloc_finalize(void) {
 }
 
 //! Initialize thread, assign heap
-extern inline void
+TRACY_API void
 rpmalloc_thread_initialize(void) {
 	if (!get_thread_heap_raw()) {
 		heap_t* heap = _memory_allocate_heap();
@@ -2020,7 +2020,7 @@ rpmalloc_thread_initialize(void) {
 }
 
 //! Finalize thread, orphan heap
-void
+TRACY_API void
 rpmalloc_thread_finalize(void) {
 	heap_t* heap = get_thread_heap_raw();
 	if (heap)
@@ -2170,7 +2170,7 @@ rpcalloc(size_t num, size_t size) {
 	return block;
 }
 
-extern inline RPMALLOC_ALLOCATOR void*
+TRACY_API RPMALLOC_ALLOCATOR void*
 rprealloc(void* ptr, size_t size) {
 #if ENABLE_VALIDATE_ARGS
 	if (size >= MAX_ALLOC_SIZE) {

@@ -9,6 +9,7 @@
 
 #include "TracyCharUtil.hpp"
 #include "TracyShortPtr.hpp"
+#include "TracySortedVector.hpp"
 #include "TracyVector.hpp"
 #include "tracy_robin_hood.h"
 #include "../common/TracyForceInline.hpp"
@@ -207,6 +208,7 @@ struct ZoneExtra
     Int24 callstack;
     StringIdx text;
     StringIdx name;
+    Int24 color;
 };
 
 enum { ZoneExtraSize = sizeof( ZoneExtra ) };
@@ -579,6 +581,7 @@ struct GpuCtxData
     int64_t calibratedGpuTime;
     int64_t calibratedCpuTime;
     double calibrationMod;
+    StringIdx name;
     unordered_flat_map<uint64_t, GpuCtxThreadData> threadData;
     short_ptr<GpuEvent> query[64*1024];
 };
@@ -634,12 +637,12 @@ enum class PlotValueFormatting : uint8_t
 
 struct PlotData
 {
+    struct PlotItemSort { bool operator()( const PlotItem& lhs, const PlotItem& rhs ) { return lhs.time.Val() < rhs.time.Val(); }; };
+
     uint64_t name;
     double min;
     double max;
-    Vector<PlotItem> data;
-    Vector<PlotItem> postpone;
-    uint64_t postponeTime;
+    SortedVector<PlotItem, PlotItemSort> data;
     PlotType type;
     PlotValueFormatting format;
 };
