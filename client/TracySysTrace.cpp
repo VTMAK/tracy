@@ -127,6 +127,7 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
 #ifdef TRACY_ON_DEMAND
     if( !GetProfiler().IsConnected() ) return;
 #endif
+    if( GetProfiler().GetSystemTracePaused()) return;
 
     const auto& hdr = record->EventHeader;
     switch( hdr.ProviderId.Data1 )

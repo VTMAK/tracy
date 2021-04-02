@@ -65,6 +65,8 @@ TRACY_API GpuCtxWrapper& GetGpuCtx();
 TRACY_API uint64_t GetThreadHandle();
 TRACY_API void InitRPMallocThread();
 TRACY_API bool ProfilerAvailable();
+TRACY_API bool SystemTraceAvailable();
+
 TRACY_API int64_t GetFrequencyQpc();
 
 struct SourceLocationData
@@ -565,6 +567,16 @@ public:
         return m_isConnected.load( std::memory_order_acquire );
     }
 
+    void SetSystemTracePaused(bool value)
+    {
+       m_isSystemTracePaused.store(value, std::memory_order_release);
+    }
+
+    tracy_force_inline bool GetSystemTracePaused()
+    {
+       return m_isSystemTracePaused.load(std::memory_order_acquire); 
+    }
+
 #ifdef TRACY_ON_DEMAND
     tracy_force_inline uint64_t ConnectionId() const
     {
@@ -810,6 +822,8 @@ private:
 #else
     void ProcessSysTime() {}
 #endif
+    std::atomic<bool> m_isSystemTracePaused;
+
 
     ParameterCallback m_paramCallback;
 
