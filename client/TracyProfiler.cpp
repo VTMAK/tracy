@@ -947,7 +947,12 @@ static Thread* s_sysTraceThread = nullptr;
 #endif
 
 TRACY_API bool ProfilerAvailable() { return s_instance != nullptr; }
-TRACY_API bool SystemTraceAvailable() { return s_sysTraceThread != nullptr; }
+TRACY_API bool SystemTraceAvailable() { 
+#ifdef TRACY_HAS_SYSTEM_TRACING
+	return s_sysTraceThread != nullptr;
+#endif 
+   return false;
+}
 
 TRACY_API int64_t GetFrequencyQpc()
 {
